@@ -97,7 +97,7 @@ class PosixLogger : public Logger {
         bufsize = sizeof(buffer);
         base = buffer;
       } else {
-        bufsize = 65536;
+        bufsize = 65536 * 4;
         base = new char[bufsize];
       }
       char* p = base;
