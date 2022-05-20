@@ -187,9 +187,15 @@ DEFINE_int32(open_files, ROCKSDB_NAMESPACE::Options().max_open_files,
              "Maximum number of files to keep open at the same time "
              "(use default if == 0)");
 
-DEFINE_int64(compressed_cache_size, -1,
+DEFINE_int64(compressed_cache_size, 0,
              "Number of bytes to use as a cache of compressed data."
-             " Negative means use default settings.");
+             " 0 means use default settings.");
+
+DEFINE_int32(
+    compressed_cache_numshardbits, -1,
+    "Number of shards for the compressed block cache is 2 ** "
+    "compressed_cache_numshardbits. Negative value means default settings. "
+    "This is applied only if compressed_cache_size is greater than 0.");
 
 DEFINE_int32(compaction_style, ROCKSDB_NAMESPACE::Options().compaction_style,
              "");
@@ -224,6 +230,10 @@ DEFINE_int32(
     ROCKSDB_NAMESPACE::BlockBasedTableOptions().index_block_restart_interval,
     "Number of keys between restart points "
     "for delta encoding of keys in index block.");
+
+DEFINE_bool(disable_auto_compactions,
+            ROCKSDB_NAMESPACE::Options().disable_auto_compactions,
+            "If true, RocksDB internally will not trigger compactions.");
 
 DEFINE_int32(max_background_compactions,
              ROCKSDB_NAMESPACE::Options().max_background_compactions,
@@ -299,6 +309,21 @@ DEFINE_int32(cache_numshardbits, 6,
 
 DEFINE_bool(cache_index_and_filter_blocks, false,
             "True if indexes/filters should be cached in block cache.");
+
+DEFINE_bool(charge_compression_dictionary_building_buffer, false,
+            "Setting for "
+            "CacheEntryRoleOptions::charged of"
+            "CacheEntryRole::kCompressionDictionaryBuildingBuffer");
+
+DEFINE_bool(charge_filter_construction, false,
+            "Setting for "
+            "CacheEntryRoleOptions::charged of"
+            "CacheEntryRole::kFilterConstruction");
+
+DEFINE_bool(charge_table_reader, false,
+            "Setting for "
+            "CacheEntryRoleOptions::charged of"
+            "CacheEntryRole::kBlockBasedTableReader");
 
 DEFINE_int32(
     top_level_index_pinning,
@@ -453,6 +478,12 @@ DEFINE_bool(
     ROCKSDB_NAMESPACE::BlockBasedTableOptions().optimize_filters_for_memory,
     "Minimize memory footprint of filters");
 
+DEFINE_bool(
+    detect_filter_construct_corruption,
+    ROCKSDB_NAMESPACE::BlockBasedTableOptions()
+        .detect_filter_construct_corruption,
+    "Detect corruption during new Bloom Filter and Ribbon Filter construction");
+
 DEFINE_int32(
     index_type,
     static_cast<int32_t>(
@@ -501,6 +532,15 @@ DEFINE_bool(sync, false, "Sync all writes to disk");
 
 DEFINE_bool(use_fsync, false, "If true, issue fsync instead of fdatasync");
 
+DEFINE_uint64(bytes_per_sync, ROCKSDB_NAMESPACE::Options().bytes_per_sync,
+              "If nonzero, sync SST file data incrementally after every "
+              "`bytes_per_sync` bytes are written");
+
+DEFINE_uint64(wal_bytes_per_sync,
+              ROCKSDB_NAMESPACE::Options().wal_bytes_per_sync,
+              "If nonzero, sync WAL file data incrementally after every "
+              "`bytes_per_sync` bytes are written");
+
 DEFINE_int32(kill_random_test, 0,
              "If non-zero, kill at various points in source code with "
              "probability 1/this");
@@ -539,6 +579,16 @@ DEFINE_uint64(rate_limiter_bytes_per_sec, 0, "Set options.rate_limiter value.");
 
 DEFINE_bool(rate_limit_bg_reads, false,
             "Use options.rate_limiter on compaction reads");
+
+DEFINE_bool(rate_limit_user_ops, false,
+            "When true use Env::IO_USER priority level to charge internal rate "
+            "limiter for reads associated with user operations.");
+
+DEFINE_bool(rate_limit_auto_wal_flush, false,
+            "When true use Env::IO_USER priority level to charge internal rate "
+            "limiter for automatic WAL flush (`Options::manual_wal_flush` == "
+            "false) after the user "
+            "write operation.");
 
 DEFINE_uint64(sst_file_manager_bytes_per_sec, 0,
               "Set `Options::sst_file_manager` to delete at this rate. By "
@@ -702,23 +752,25 @@ DEFINE_uint64(compression_max_dict_buffer_bytes, 0,
               "Buffering limit for SST file data to sample for dictionary "
               "compression.");
 
+DEFINE_bool(
+    compression_use_zstd_dict_trainer, true,
+    "Use zstd's trainer to generate dictionary. If the options is false, "
+    "zstd's finalizeDictionary() API is used to generate dictionary. "
+    "ZSTD 1.4.5+ is required. If ZSTD 1.4.5+ is not linked with the binary, "
+    "this flag will have the default value true.");
+
 DEFINE_string(bottommost_compression_type, "disable",
               "Algorithm to use to compress bottommost level of the database. "
               "\"disable\" means disabling the feature");
 
 DEFINE_string(checksum_type, "kCRC32c", "Algorithm to use to checksum blocks");
 
-DEFINE_string(hdfs, "",
-              "Name of hdfs environment. Mutually exclusive with"
-              " --env_uri and --fs_uri.");
-
-DEFINE_string(
-    env_uri, "",
-    "URI for env lookup. Mutually exclusive with --hdfs and --fs_uri");
+DEFINE_string(env_uri, "",
+              "URI for env lookup. Mutually exclusive with --fs_uri");
 
 DEFINE_string(fs_uri, "",
               "URI for registry Filesystem lookup. Mutually exclusive"
-              " with --hdfs and --env_uri."
+              " with --env_uri."
               " Creates a default environment with the specified filesystem.");
 
 DEFINE_uint64(ops_per_thread, 1200000, "Number of operations per thread.");
@@ -878,5 +930,39 @@ DEFINE_int32(prepopulate_block_cache,
                                       PrepopulateBlockCache::kDisable),
              "Options related to cache warming (see `enum "
              "PrepopulateBlockCache` in table.h)");
+
+DEFINE_bool(two_write_queues, false,
+            "Set to true to enable two write queues. Default: false");
+#ifndef ROCKSDB_LITE
+
+DEFINE_bool(use_only_the_last_commit_time_batch_for_recovery, false,
+            "If true, the commit-time write batch will not be immediately "
+            "inserted into the memtables. Default: false");
+
+DEFINE_uint64(
+    wp_snapshot_cache_bits, 7ull,
+    "Number of bits to represent write-prepared transaction db's snapshot "
+    "cache. Default: 7 (128 entries)");
+
+DEFINE_uint64(wp_commit_cache_bits, 23ull,
+              "Number of bits to represent write-prepared transaction db's "
+              "commit cache. Default: 23 (8M entries)");
+#endif  // !ROCKSDB_LITE
+
+DEFINE_bool(adaptive_readahead, false,
+            "Carry forward internal auto readahead size from one file to next "
+            "file at each level during iteration");
+DEFINE_bool(
+    async_io, false,
+    "Does asynchronous prefetching when internal auto readahead is enabled");
+
+DEFINE_string(wal_compression, "none",
+              "Algorithm to use for WAL compression. none to disable.");
+
+DEFINE_bool(
+    verify_sst_unique_id_in_manifest, false,
+    "Enable DB options `verify_sst_unique_id_in_manifest`, if true, during "
+    "DB-open try verifying the SST unique id between MANIFEST and SST "
+    "properties.");
 
 #endif  // GFLAGS

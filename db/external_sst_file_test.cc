@@ -27,6 +27,8 @@ class ExternalSSTTestEnv : public EnvWrapper {
  public:
   ExternalSSTTestEnv(Env* t, bool fail_link)
       : EnvWrapper(t), fail_link_(fail_link) {}
+  static const char* kClassName() { return "ExternalSSTTestEnv"; }
+  const char* Name() const override { return kClassName(); }
 
   Status LinkFile(const std::string& s, const std::string& t) override {
     if (fail_link_) {
@@ -116,7 +118,7 @@ class ExternalSSTFileTest
           });
       data.resize(uniq_iter - data.begin());
     }
-    std::string file_path = sst_files_dir_ + ToString(file_id);
+    std::string file_path = sst_files_dir_ + std::to_string(file_id);
     SstFileWriter sst_file_writer(EnvOptions(), options, cfh);
     Status s = sst_file_writer.Open(file_path);
     if (!s.ok()) {
@@ -170,7 +172,7 @@ class ExternalSSTFileTest
           });
       data.resize(uniq_iter - data.begin());
     }
-    std::string file_path = sst_files_dir_ + ToString(file_id);
+    std::string file_path = sst_files_dir_ + std::to_string(file_id);
     SstFileWriter sst_file_writer(EnvOptions(), options, cfh);
 
     Status s = sst_file_writer.Open(file_path);
@@ -268,7 +270,7 @@ class ExternalSSTFileTest
       ColumnFamilyHandle* cfh = nullptr) {
     std::vector<std::pair<std::string, std::string>> file_data;
     for (auto& k : keys) {
-      file_data.emplace_back(Key(k), Key(k) + ToString(file_id));
+      file_data.emplace_back(Key(k), Key(k) + std::to_string(file_id));
     }
     return GenerateAndAddExternalFile(options, file_data, file_id,
                                       allow_global_seqno, write_global_seqno,
@@ -964,7 +966,7 @@ TEST_F(ExternalSSTFileTest, MultiThreaded) {
   // Generate file names
   std::vector<std::string> file_names;
   for (int i = 0; i < num_files; i++) {
-    std::string file_name = "file_" + ToString(i) + ".sst";
+    std::string file_name = "file_" + std::to_string(i) + ".sst";
     file_names.push_back(sst_files_dir_ + file_name);
   }
 
@@ -1114,7 +1116,7 @@ TEST_F(ExternalSSTFileTest, OverlappingRanges) {
       int range_end = key_ranges[i].second;
 
       Status s;
-      std::string range_val = "range_" + ToString(i);
+      std::string range_val = "range_" + std::to_string(i);
 
       // For 20% of ranges we use DB::Put, for 80% we use DB::AddFile
       if (i && i % 5 == 0) {
@@ -1454,7 +1456,7 @@ TEST_F(ExternalSSTFileTest, CompactDuringAddFileRandom) {
     ASSERT_EQ(Get(Key(range_start)), Key(range_start)) << rid;
     ASSERT_EQ(Get(Key(range_end)), Key(range_end)) << rid;
     for (int k = range_start + 1; k < range_end; k++) {
-      std::string v = Key(k) + ToString(rid);
+      std::string v = Key(k) + std::to_string(rid);
       ASSERT_EQ(Get(Key(k)), v) << rid;
     }
   }
@@ -2403,7 +2405,7 @@ TEST_P(ExternalSSTBlockChecksumTest, DISABLED_HugeBlockChecksum) {
     SstFileWriter sst_file_writer(EnvOptions(), options);
 
     // 2^32 - 1, will lead to data block with more than 2^32 bytes
-    size_t huge_size = port::kMaxUint32;
+    size_t huge_size = std::numeric_limits<uint32_t>::max();
 
     std::string f = sst_files_dir_ + "f.sst";
     ASSERT_OK(sst_file_writer.Open(f));

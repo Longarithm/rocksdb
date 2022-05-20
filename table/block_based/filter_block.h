@@ -83,9 +83,17 @@ class FilterBlockBuilder {
       ,
       Status* status, std::unique_ptr<const char[]>* filter_data = nullptr) = 0;
 
-  // It is for releasing the memory usage and cache reservation of filter bits
-  // builder in FullFilter and PartitionedFilter
+  // This is called when finishes using the FilterBitsBuilder
+  // in order to release memory usage and cache charge
+  // associated with it timely
   virtual void ResetFilterBitsBuilder() {}
+
+  // To optionally post-verify the filter returned from
+  // FilterBlockBuilder::Finish.
+  // Return Status::OK() if skipped.
+  virtual Status MaybePostVerifyFilter(const Slice& /* filter_content */) {
+    return Status::OK();
+  }
 };
 
 // A FilterBlockReader is used to parse filter from SST table.
@@ -180,16 +188,7 @@ class FilterBlockReader {
                              const Slice* const const_ikey_ptr,
                              bool* filter_checked, bool need_upper_bound_check,
                              bool no_io,
-                             BlockCacheLookupContext* lookup_context) {
-    if (need_upper_bound_check) {
-      return true;
-    }
-    *filter_checked = true;
-    Slice prefix = prefix_extractor->Transform(user_key_without_ts);
-    return PrefixMayMatch(prefix, prefix_extractor, kNotValid, no_io,
-                          const_ikey_ptr, /* get_context */ nullptr,
-                          lookup_context);
-  }
+                             BlockCacheLookupContext* lookup_context) = 0;
 };
 
 }  // namespace ROCKSDB_NAMESPACE

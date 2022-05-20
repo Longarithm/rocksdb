@@ -1078,6 +1078,11 @@ void CheckColumnFamilyMeta(
       ASSERT_LE(file_meta_from_cf.file_creation_time, end_time);
       ASSERT_GE(file_meta_from_cf.oldest_ancester_time, start_time);
       ASSERT_LE(file_meta_from_cf.oldest_ancester_time, end_time);
+      // More from FileStorageInfo
+      ASSERT_EQ(file_meta_from_cf.file_type, kTableFile);
+      ASSERT_EQ(file_meta_from_cf.name,
+                "/" + file_meta_from_cf.relative_filename);
+      ASSERT_EQ(file_meta_from_cf.directory, file_meta_from_cf.db_path);
     }
 
     ASSERT_EQ(level_meta_from_cf.size, level_size);
@@ -1121,6 +1126,11 @@ void CheckLiveFilesMeta(
     ASSERT_EQ(meta.largestkey, expected_meta.largest.user_key().ToString());
     ASSERT_EQ(meta.oldest_blob_file_number,
               expected_meta.oldest_blob_file_number);
+
+    // More from FileStorageInfo
+    ASSERT_EQ(meta.file_type, kTableFile);
+    ASSERT_EQ(meta.name, "/" + meta.relative_filename);
+    ASSERT_EQ(meta.directory, meta.db_path);
 
     ++i;
   }
@@ -1450,7 +1460,7 @@ TEST_F(DBTest, ApproximateSizesMemTable) {
   std::string end = Key(60);
   Range r(start, end);
   SizeApproximationOptions size_approx_options;
-  size_approx_options.include_memtabtles = true;
+  size_approx_options.include_memtables = true;
   size_approx_options.include_files = true;
   ASSERT_OK(
       db_->GetApproximateSizes(size_approx_options, default_cf, &r, 1, &size));
@@ -1551,8 +1561,8 @@ TEST_F(DBTest, ApproximateSizesMemTable) {
   ASSERT_GT(size_with_mt, size_without_mt);
   ASSERT_GT(size_without_mt, 6000);
 
-  // Check that include_memtabtles flag works as expected
-  size_approx_options.include_memtabtles = false;
+  // Check that include_memtables flag works as expected
+  size_approx_options.include_memtables = false;
   ASSERT_OK(
       db_->GetApproximateSizes(size_approx_options, default_cf, &r, 1, &size));
   ASSERT_EQ(size, size_without_mt);
@@ -1614,7 +1624,7 @@ TEST_F(DBTest, ApproximateSizesFilesWithErrorMargin) {
     const Range r(start, end);
 
     SizeApproximationOptions size_approx_options;
-    size_approx_options.include_memtabtles = false;
+    size_approx_options.include_memtables = false;
     size_approx_options.include_files = true;
     size_approx_options.files_size_error_margin = -1.0;  // disabled
 
@@ -2417,8 +2427,8 @@ TEST_F(DBTest, SnapshotFiles) {
 
     // Also test GetLiveFilesStorageInfo
     std::vector<LiveFileStorageInfo> new_infos;
-    ASSERT_OK(dbfull()->GetLiveFilesStorageInfo(LiveFilesStorageInfoOptions(),
-                                                &new_infos));
+    ASSERT_OK(db_->GetLiveFilesStorageInfo(LiveFilesStorageInfoOptions(),
+                                           &new_infos));
 
     // Close DB (while deletions disabled)
     Close();
@@ -2576,9 +2586,7 @@ static const int kNumKeys = 1000;
 
 struct MTState {
   DBTest* test;
-  std::atomic<bool> stop;
   std::atomic<int> counter[kNumThreads];
-  std::atomic<bool> thread_done[kNumThreads];
 };
 
 struct MTThread {
@@ -2592,10 +2600,13 @@ static void MTThreadBody(void* arg) {
   int id = t->id;
   DB* db = t->state->test->db_;
   int counter = 0;
+  std::shared_ptr<SystemClock> clock = SystemClock::Default();
+  auto end_micros = clock->NowMicros() + kTestSeconds * 1000000U;
+
   fprintf(stderr, "... starting thread %d\n", id);
   Random rnd(1000 + id);
   char valbuf[1500];
-  while (t->state->stop.load(std::memory_order_acquire) == false) {
+  while (clock->NowMicros() < end_micros) {
     t->state->counter[id].store(counter, std::memory_order_release);
 
     int key = rnd.Uniform(kNumKeys);
@@ -2692,7 +2703,6 @@ static void MTThreadBody(void* arg) {
     }
     counter++;
   }
-  t->state->thread_done[id].store(true, std::memory_order_release);
   fprintf(stderr, "... stopping thread %d after %d ops\n", id, int(counter));
 }
 
@@ -2724,17 +2734,15 @@ TEST_P(MultiThreadedDBTest, MultiThreaded) {
   Options options = CurrentOptions(options_override);
   std::vector<std::string> cfs;
   for (int i = 1; i < kColumnFamilies; ++i) {
-    cfs.push_back(ToString(i));
+    cfs.push_back(std::to_string(i));
   }
   Reopen(options);
   CreateAndReopenWithCF(cfs, options);
   // Initialize state
   MTState mt;
   mt.test = this;
-  mt.stop.store(false, std::memory_order_release);
   for (int id = 0; id < kNumThreads; id++) {
     mt.counter[id].store(0, std::memory_order_release);
-    mt.thread_done[id].store(false, std::memory_order_release);
   }
 
   // Start threads
@@ -2746,16 +2754,7 @@ TEST_P(MultiThreadedDBTest, MultiThreaded) {
     env_->StartThread(MTThreadBody, &thread[id]);
   }
 
-  // Let them run for a while
-  env_->SleepForMicroseconds(kTestSeconds * 1000000);
-
-  // Stop the threads and wait for them to finish
-  mt.stop.store(true, std::memory_order_release);
-  for (int id = 0; id < kNumThreads; id++) {
-    while (mt.thread_done[id].load(std::memory_order_acquire) == false) {
-      env_->SleepForMicroseconds(100000);
-    }
-  }
+  env_->WaitForJoin();
 }
 
 INSTANTIATE_TEST_CASE_P(
@@ -2787,7 +2786,7 @@ static void GCThreadBody(void* arg) {
   WriteOptions wo;
 
   for (int i = 0; i < kGCNumKeys; ++i) {
-    std::string kv(ToString(i + id * kGCNumKeys));
+    std::string kv(std::to_string(i + id * kGCNumKeys));
     ASSERT_OK(db->Put(wo, kv, kv));
   }
   t->done = true;
@@ -2823,7 +2822,7 @@ TEST_F(DBTest, GroupCommitTest) {
 
     std::vector<std::string> expected_db;
     for (int i = 0; i < kGCNumThreads * kGCNumKeys; ++i) {
-      expected_db.push_back(ToString(i));
+      expected_db.push_back(std::to_string(i));
     }
     std::sort(expected_db.begin(), expected_db.end());
 
@@ -2873,6 +2872,11 @@ class ModelDB : public DB {
     }
     return Write(o, &batch);
   }
+  Status Put(const WriteOptions& /*o*/, ColumnFamilyHandle* /*cf*/,
+             const Slice& /*k*/, const Slice& /*ts*/,
+             const Slice& /*v*/) override {
+    return Status::NotSupported();
+  }
   using DB::Close;
   Status Close() override { return Status::OK(); }
   using DB::Delete;
@@ -2885,6 +2889,10 @@ class ModelDB : public DB {
     }
     return Write(o, &batch);
   }
+  Status Delete(const WriteOptions& /*o*/, ColumnFamilyHandle* /*cf*/,
+                const Slice& /*key*/, const Slice& /*ts*/) override {
+    return Status::NotSupported();
+  }
   using DB::SingleDelete;
   Status SingleDelete(const WriteOptions& o, ColumnFamilyHandle* cf,
                       const Slice& key) override {
@@ -2894,6 +2902,10 @@ class ModelDB : public DB {
       return s;
     }
     return Write(o, &batch);
+  }
+  Status SingleDelete(const WriteOptions& /*o*/, ColumnFamilyHandle* /*cf*/,
+                      const Slice& /*key*/, const Slice& /*ts*/) override {
+    return Status::NotSupported();
   }
   using DB::Merge;
   Status Merge(const WriteOptions& o, ColumnFamilyHandle* cf, const Slice& k,
@@ -3210,8 +3222,14 @@ class ModelDB : public DB {
 
   SequenceNumber GetLatestSequenceNumber() const override { return 0; }
 
-  bool SetPreserveDeletesSequenceNumber(SequenceNumber /*seqnum*/) override {
-    return true;
+  Status IncreaseFullHistoryTsLow(ColumnFamilyHandle* /*cf*/,
+                                  std::string /*ts_low*/) override {
+    return Status::OK();
+  }
+
+  Status GetFullHistoryTsLow(ColumnFamilyHandle* /*cf*/,
+                             std::string* /*ts_low*/) override {
+    return Status::OK();
   }
 
   ColumnFamilyHandle* DefaultColumnFamily() const override { return nullptr; }
@@ -3573,7 +3591,7 @@ TEST_P(DBTestWithParam, FIFOCompactionTest) {
     Random rnd(301);
     for (int i = 0; i < 6; ++i) {
       for (int j = 0; j < 110; ++j) {
-        ASSERT_OK(Put(ToString(i * 100 + j), rnd.RandomString(980)));
+        ASSERT_OK(Put(std::to_string(i * 100 + j), rnd.RandomString(980)));
       }
       // flush should happen here
       ASSERT_OK(dbfull()->TEST_WaitForFlushMemTable());
@@ -3589,7 +3607,7 @@ TEST_P(DBTestWithParam, FIFOCompactionTest) {
     ASSERT_EQ(NumTableFilesAtLevel(0), 5);
     for (int i = 0; i < 50; ++i) {
       // these keys should be deleted in previous compaction
-      ASSERT_EQ("NOT_FOUND", Get(ToString(i)));
+      ASSERT_EQ("NOT_FOUND", Get(std::to_string(i)));
     }
   }
 }
@@ -3611,7 +3629,7 @@ TEST_F(DBTest, FIFOCompactionTestWithCompaction) {
   for (int i = 0; i < 60; i++) {
     // Generate and flush a file about 20KB.
     for (int j = 0; j < 20; j++) {
-      ASSERT_OK(Put(ToString(i * 20 + j), rnd.RandomString(980)));
+      ASSERT_OK(Put(std::to_string(i * 20 + j), rnd.RandomString(980)));
     }
     ASSERT_OK(Flush());
     ASSERT_OK(dbfull()->TEST_WaitForCompact());
@@ -3622,7 +3640,7 @@ TEST_F(DBTest, FIFOCompactionTestWithCompaction) {
   for (int i = 0; i < 60; i++) {
     // Generate and flush a file about 20KB.
     for (int j = 0; j < 20; j++) {
-      ASSERT_OK(Put(ToString(i * 20 + j + 2000), rnd.RandomString(980)));
+      ASSERT_OK(Put(std::to_string(i * 20 + j + 2000), rnd.RandomString(980)));
     }
     ASSERT_OK(Flush());
     ASSERT_OK(dbfull()->TEST_WaitForCompact());
@@ -3652,27 +3670,27 @@ TEST_F(DBTest, FIFOCompactionStyleWithCompactionAndDelete) {
   Random rnd(301);
   for (int i = 0; i < 3; i++) {
     // Each file contains a different key which will be dropped later.
-    ASSERT_OK(Put("a" + ToString(i), rnd.RandomString(500)));
-    ASSERT_OK(Put("key" + ToString(i), ""));
-    ASSERT_OK(Put("z" + ToString(i), rnd.RandomString(500)));
+    ASSERT_OK(Put("a" + std::to_string(i), rnd.RandomString(500)));
+    ASSERT_OK(Put("key" + std::to_string(i), ""));
+    ASSERT_OK(Put("z" + std::to_string(i), rnd.RandomString(500)));
     ASSERT_OK(Flush());
     ASSERT_OK(dbfull()->TEST_WaitForCompact());
   }
   ASSERT_EQ(NumTableFilesAtLevel(0), 1);
   for (int i = 0; i < 3; i++) {
-    ASSERT_EQ("", Get("key" + ToString(i)));
+    ASSERT_EQ("", Get("key" + std::to_string(i)));
   }
   for (int i = 0; i < 3; i++) {
     // Each file contains a different key which will be dropped later.
-    ASSERT_OK(Put("a" + ToString(i), rnd.RandomString(500)));
-    ASSERT_OK(Delete("key" + ToString(i)));
-    ASSERT_OK(Put("z" + ToString(i), rnd.RandomString(500)));
+    ASSERT_OK(Put("a" + std::to_string(i), rnd.RandomString(500)));
+    ASSERT_OK(Delete("key" + std::to_string(i)));
+    ASSERT_OK(Put("z" + std::to_string(i), rnd.RandomString(500)));
     ASSERT_OK(Flush());
     ASSERT_OK(dbfull()->TEST_WaitForCompact());
   }
   ASSERT_EQ(NumTableFilesAtLevel(0), 2);
   for (int i = 0; i < 3; i++) {
-    ASSERT_EQ("NOT_FOUND", Get("key" + ToString(i)));
+    ASSERT_EQ("NOT_FOUND", Get("key" + std::to_string(i)));
   }
 }
 
@@ -3741,7 +3759,7 @@ TEST_F(DBTest, FIFOCompactionWithTTLTest) {
     for (int i = 0; i < 10; i++) {
       // Generate and flush a file about 10KB.
       for (int j = 0; j < 10; j++) {
-        ASSERT_OK(Put(ToString(i * 20 + j), rnd.RandomString(980)));
+        ASSERT_OK(Put(std::to_string(i * 20 + j), rnd.RandomString(980)));
       }
       ASSERT_OK(Flush());
       ASSERT_OK(dbfull()->TEST_WaitForCompact());
@@ -3773,7 +3791,7 @@ TEST_F(DBTest, FIFOCompactionWithTTLTest) {
     for (int i = 0; i < 10; i++) {
       // Generate and flush a file about 10KB.
       for (int j = 0; j < 10; j++) {
-        ASSERT_OK(Put(ToString(i * 20 + j), rnd.RandomString(980)));
+        ASSERT_OK(Put(std::to_string(i * 20 + j), rnd.RandomString(980)));
       }
       ASSERT_OK(Flush());
       ASSERT_OK(dbfull()->TEST_WaitForCompact());
@@ -3789,7 +3807,7 @@ TEST_F(DBTest, FIFOCompactionWithTTLTest) {
     // Create 1 more file to trigger TTL compaction. The old files are dropped.
     for (int i = 0; i < 1; i++) {
       for (int j = 0; j < 10; j++) {
-        ASSERT_OK(Put(ToString(i * 20 + j), rnd.RandomString(980)));
+        ASSERT_OK(Put(std::to_string(i * 20 + j), rnd.RandomString(980)));
       }
       ASSERT_OK(Flush());
     }
@@ -3815,7 +3833,7 @@ TEST_F(DBTest, FIFOCompactionWithTTLTest) {
     for (int i = 0; i < 3; i++) {
       // Generate and flush a file about 10KB.
       for (int j = 0; j < 10; j++) {
-        ASSERT_OK(Put(ToString(i * 20 + j), rnd.RandomString(980)));
+        ASSERT_OK(Put(std::to_string(i * 20 + j), rnd.RandomString(980)));
       }
       ASSERT_OK(Flush());
       ASSERT_OK(dbfull()->TEST_WaitForCompact());
@@ -3830,7 +3848,7 @@ TEST_F(DBTest, FIFOCompactionWithTTLTest) {
 
     for (int i = 0; i < 5; i++) {
       for (int j = 0; j < 140; j++) {
-        ASSERT_OK(Put(ToString(i * 20 + j), rnd.RandomString(980)));
+        ASSERT_OK(Put(std::to_string(i * 20 + j), rnd.RandomString(980)));
       }
       ASSERT_OK(Flush());
       ASSERT_OK(dbfull()->TEST_WaitForCompact());
@@ -3853,7 +3871,7 @@ TEST_F(DBTest, FIFOCompactionWithTTLTest) {
     for (int i = 0; i < 10; i++) {
       // Generate and flush a file about 10KB.
       for (int j = 0; j < 10; j++) {
-        ASSERT_OK(Put(ToString(i * 20 + j), rnd.RandomString(980)));
+        ASSERT_OK(Put(std::to_string(i * 20 + j), rnd.RandomString(980)));
       }
       ASSERT_OK(Flush());
       ASSERT_OK(dbfull()->TEST_WaitForCompact());
@@ -3872,7 +3890,7 @@ TEST_F(DBTest, FIFOCompactionWithTTLTest) {
     // Create 10 more files. The old 5 files are dropped as their ttl expired.
     for (int i = 0; i < 10; i++) {
       for (int j = 0; j < 10; j++) {
-        ASSERT_OK(Put(ToString(i * 20 + j), rnd.RandomString(980)));
+        ASSERT_OK(Put(std::to_string(i * 20 + j), rnd.RandomString(980)));
       }
       ASSERT_OK(Flush());
       ASSERT_OK(dbfull()->TEST_WaitForCompact());
@@ -3897,7 +3915,7 @@ TEST_F(DBTest, FIFOCompactionWithTTLTest) {
     for (int i = 0; i < 60; i++) {
       // Generate and flush a file about 20KB.
       for (int j = 0; j < 20; j++) {
-        ASSERT_OK(Put(ToString(i * 20 + j), rnd.RandomString(980)));
+        ASSERT_OK(Put(std::to_string(i * 20 + j), rnd.RandomString(980)));
       }
       ASSERT_OK(Flush());
       ASSERT_OK(dbfull()->TEST_WaitForCompact());
@@ -3908,7 +3926,8 @@ TEST_F(DBTest, FIFOCompactionWithTTLTest) {
     for (int i = 0; i < 60; i++) {
       // Generate and flush a file about 20KB.
       for (int j = 0; j < 20; j++) {
-        ASSERT_OK(Put(ToString(i * 20 + j + 2000), rnd.RandomString(980)));
+        ASSERT_OK(
+            Put(std::to_string(i * 20 + j + 2000), rnd.RandomString(980)));
       }
       ASSERT_OK(Flush());
       ASSERT_OK(dbfull()->TEST_WaitForCompact());
@@ -4189,7 +4208,7 @@ TEST_F(DBTest, ConcurrentFlushWAL) {
       std::vector<port::Thread> threads;
       threads.emplace_back([&] {
         for (size_t i = 0; i < cnt; i++) {
-          auto istr = ToString(i);
+          auto istr = std::to_string(i);
           ASSERT_OK(db_->Put(wopt, db_->DefaultColumnFamily(), "a" + istr,
                              "b" + istr));
         }
@@ -4197,7 +4216,7 @@ TEST_F(DBTest, ConcurrentFlushWAL) {
       if (two_write_queues) {
         threads.emplace_back([&] {
           for (size_t i = cnt; i < 2 * cnt; i++) {
-            auto istr = ToString(i);
+            auto istr = std::to_string(i);
             WriteBatch batch;
             ASSERT_OK(batch.Put("a" + istr, "b" + istr));
             ASSERT_OK(
@@ -4218,7 +4237,7 @@ TEST_F(DBTest, ConcurrentFlushWAL) {
       Reopen(options);
       for (size_t i = 0; i < cnt; i++) {
         PinnableSlice pval;
-        auto istr = ToString(i);
+        auto istr = std::to_string(i);
         ASSERT_OK(
             db_->Get(ropt, db_->DefaultColumnFamily(), "a" + istr, &pval));
         ASSERT_TRUE(pval == ("b" + istr));
@@ -4241,7 +4260,7 @@ TEST_F(DBTest, ManualFlushWalAndWriteRace) {
 
   port::Thread writeThread([&]() {
     for (int i = 0; i < 100; i++) {
-      auto istr = ToString(i);
+      auto istr = std::to_string(i);
       ASSERT_OK(dbfull()->Put(wopts, "key_" + istr, "value_" + istr));
     }
   });
@@ -4589,7 +4608,7 @@ TEST_P(DBTestWithParam, ThreadStatusSingleCompaction) {
     // The Put Phase.
     for (int file = 0; file < kNumL0Files; ++file) {
       for (int key = 0; key < kEntriesPerBuffer; ++key) {
-        ASSERT_OK(Put(ToString(key + file * kEntriesPerBuffer),
+        ASSERT_OK(Put(std::to_string(key + file * kEntriesPerBuffer),
                       rnd.RandomString(kTestValueSize)));
       }
       ASSERT_OK(Flush());
@@ -4740,7 +4759,7 @@ TEST_P(DBTestWithParam, PreShutdownMultipleCompaction) {
   int operation_count[ThreadStatus::NUM_OP_TYPES] = {0};
   for (int file = 0; file < 16 * kNumL0Files; ++file) {
     for (int k = 0; k < kEntriesPerBuffer; ++k) {
-      ASSERT_OK(Put(ToString(key++), rnd.RandomString(kTestValueSize)));
+      ASSERT_OK(Put(std::to_string(key++), rnd.RandomString(kTestValueSize)));
     }
 
     ASSERT_OK(env_->GetThreadList(&thread_list));
@@ -4827,7 +4846,7 @@ TEST_P(DBTestWithParam, PreShutdownCompactionMiddle) {
   int operation_count[ThreadStatus::NUM_OP_TYPES] = {0};
   for (int file = 0; file < 16 * kNumL0Files; ++file) {
     for (int k = 0; k < kEntriesPerBuffer; ++k) {
-      ASSERT_OK(Put(ToString(key++), rnd.RandomString(kTestValueSize)));
+      ASSERT_OK(Put(std::to_string(key++), rnd.RandomString(kTestValueSize)));
     }
 
     ASSERT_OK(env_->GetThreadList(&thread_list));
@@ -4932,6 +4951,7 @@ TEST_F(DBTest, DynamicLevelCompressionPerLevel) {
   ASSERT_OK(dbfull()->TEST_WaitForCompact());
   ASSERT_EQ(NumTableFilesAtLevel(1), 0);
   ASSERT_EQ(NumTableFilesAtLevel(2), 0);
+
   ASSERT_LT(SizeAtLevel(0) + SizeAtLevel(3) + SizeAtLevel(4),
             120U * 4000U + 50U * 24);
   // Make sure data in files in L3 is not compacted by removing all files
@@ -5137,8 +5157,9 @@ TEST_F(DBTest, DynamicCompactionOptions) {
   // Writing to 64KB L0 files should trigger a compaction. Since these
   // 2 L0 files have the same key range, compaction merge them and should
   // result in 2 32KB L1 files.
-  ASSERT_OK(dbfull()->SetOptions({{"level0_file_num_compaction_trigger", "2"},
-                                  {"target_file_size_base", ToString(k32KB)}}));
+  ASSERT_OK(
+      dbfull()->SetOptions({{"level0_file_num_compaction_trigger", "2"},
+                            {"target_file_size_base", std::to_string(k32KB)}}));
 
   gen_l0_kb(0, 64, 1);
   ASSERT_EQ("1,1", FilesPerLevel());
@@ -5157,8 +5178,8 @@ TEST_F(DBTest, DynamicCompactionOptions) {
   // Increase level base size to 256KB and write enough data that will
   // fill L1 and L2. L1 size should be around 256KB while L2 size should be
   // around 256KB x 4.
-  ASSERT_OK(
-      dbfull()->SetOptions({{"max_bytes_for_level_base", ToString(k1MB)}}));
+  ASSERT_OK(dbfull()->SetOptions(
+      {{"max_bytes_for_level_base", std::to_string(k1MB)}}));
 
   // writing 96 x 64KB => 6 * 1024KB
   // (L1 + L2) = (1 + 4) * 1024KB
@@ -5177,9 +5198,9 @@ TEST_F(DBTest, DynamicCompactionOptions) {
   // max_bytes_for_level_base. Now, reduce both mulitplier and level base,
   // After filling enough data that can fit in L1 - L3, we should see L1 size
   // reduces to 128KB from 256KB which was asserted previously. Same for L2.
-  ASSERT_OK(
-      dbfull()->SetOptions({{"max_bytes_for_level_multiplier", "2"},
-                            {"max_bytes_for_level_base", ToString(k128KB)}}));
+  ASSERT_OK(dbfull()->SetOptions(
+      {{"max_bytes_for_level_multiplier", "2"},
+       {"max_bytes_for_level_base", std::to_string(k128KB)}}));
 
   // writing 20 x 64KB = 10 x 128KB
   // (L1 + L2 + L3) = (1 + 2 + 4) * 128KB
@@ -5835,7 +5856,7 @@ TEST_P(DBTestWithParam, FilterCompactionTimeTest) {
   // put some data
   for (int table = 0; table < 4; ++table) {
     for (int i = 0; i < 10 + table; ++i) {
-      ASSERT_OK(Put(ToString(table * 100 + i), "val"));
+      ASSERT_OK(Put(std::to_string(table * 100 + i), "val"));
       ++n;
     }
     ASSERT_OK(Flush());
@@ -6219,7 +6240,7 @@ TEST_F(DBTest, LargeBatchWithColumnFamilies) {
               (write_size / 1024 / 1024), pass);
       for (;;) {
         std::string data(3000, j++ % 127 + 20);
-        data += ToString(j);
+        data += std::to_string(j);
         ASSERT_OK(batch.Put(handles_[0], Slice(data), Slice(data)));
         if (batch.GetDataSize() > write_size) {
           break;
@@ -6530,6 +6551,10 @@ TEST_F(DBTest, SoftLimit) {
   ASSERT_OK(dbfull()->TEST_WaitForCompact());
 
   // Now there is one L1 file but doesn't trigger soft_rate_limit
+  //
+  // TODO: soft_rate_limit is depreciated. If this test
+  // relies on soft_rate_limit, then we need to change the test.
+  //
   // The L1 file size is around 30KB.
   ASSERT_EQ(NumTableFilesAtLevel(1), 1);
   ASSERT_TRUE(!dbfull()->TEST_write_controler().NeedsDelay());
@@ -7000,8 +7025,9 @@ TEST_F(DBTest, MemoryUsageWithMaxWriteBufferSizeToMaintain) {
     if ((size_all_mem_table > cur_active_mem) &&
         (cur_active_mem >=
          static_cast<uint64_t>(options.max_write_buffer_size_to_maintain)) &&
-        (size_all_mem_table > options.max_write_buffer_size_to_maintain +
-                                  options.write_buffer_size)) {
+        (size_all_mem_table >
+         static_cast<uint64_t>(options.max_write_buffer_size_to_maintain) +
+             options.write_buffer_size)) {
       ASSERT_FALSE(memory_limit_exceeded);
       memory_limit_exceeded = true;
     } else {

@@ -151,7 +151,7 @@ class TablePropertiesCollectorFactory : public Customizable {
     static const int kUnknownLevelAtCreation = -1;
   };
 
-  virtual ~TablePropertiesCollectorFactory() {}
+  ~TablePropertiesCollectorFactory() override {}
   static const char* Type() { return "TablePropertiesCollectorFactory"; }
   static Status CreateFromString(
       const ConfigOptions& options, const std::string& value,
@@ -162,7 +162,7 @@ class TablePropertiesCollectorFactory : public Customizable {
       TablePropertiesCollectorFactory::Context context) = 0;
 
   // The name of the properties collector can be used for debugging purpose.
-  virtual const char* Name() const override = 0;
+  const char* Name() const override = 0;
 
   // Can be overridden by sub-classes to return the Name, followed by
   // configuration info that will // be logged to the info log when the
@@ -301,6 +301,10 @@ struct TableProperties {
   // between tables. Keys match field names in this class instead
   // of using full property names.
   std::map<std::string, uint64_t> GetAggregatablePropertiesAsMap() const;
+
+  // Return the approximated memory usage of this TableProperties object,
+  // including memory used by the string properties and UserCollectedProperties
+  std::size_t ApproximateMemoryUsage() const;
 };
 
 // Extra properties
